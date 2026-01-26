@@ -7,13 +7,13 @@ print_usage() {
     echo "Correct usage: $0 <file_path> <text to write>"
 }
 
-if [ $# -ne 3 ]
+if [ $# -ne 2 ]
 then
     print_usage()
     exit 1
 fi
 
-parent_path=$(dirname $1)
+parent_path=$(dirname $1 2> /dev/null)
 
 if [ ! -d $parent_path ]
 then
@@ -25,12 +25,11 @@ then
     fi
 fi
 
-
 echo $2 > $1 2> /dev/null
 
 if [ $? -ne 0 ]
 then
-    echo "Couldn't write to $1"
+    echo "Couldn't write to \"$1\""
     exit 1
 fi
 

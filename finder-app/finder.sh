@@ -7,7 +7,7 @@ print_usage() {
     echo "Correct usage: $0 <directory> <text to search for>"
 }
 
-if [ $# -ne 3 ]
+if [ $# -ne 2 ]
 then
     print_usage()
     exit 1
