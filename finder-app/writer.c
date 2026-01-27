@@ -13,6 +13,7 @@ int main(int argc, char* argv[]) {
 
     if (argc != 3) {
         syslog(LOG_ERR, "Wrong number of arguments passed: %d. Expected 2", argc - 1);
+        closelog();
         exit(1);     // referred from https://stackoverflow.com/questions/2425167/use-of-exit-function
     }
 
@@ -22,6 +23,8 @@ int main(int argc, char* argv[]) {
     if (fd == -1) {
         int err1 = errno;
         syslog(LOG_ERR, "Error while creating or opening file: %s", strerror(err1));
+        closelog();
+        close(fd);
         exit(1);
     }
 
@@ -33,16 +36,21 @@ int main(int argc, char* argv[]) {
     if (nr == -1) {
         int err2 = errno;
         syslog(LOG_ERR, "Error while writing to file %s", strerror(err2));
+        closelog();
+        close(fd);
         exit(1);
     }
 
     if (nr != lenToWrite) {
         int err3 = errno;
         syslog(LOG_ERR, "Could not write entire input to file");
+        closelog();
+        close(fd);
         exit(1);
     }
 
     closelog();
+    close(fd);
 
     return 0;
 }
