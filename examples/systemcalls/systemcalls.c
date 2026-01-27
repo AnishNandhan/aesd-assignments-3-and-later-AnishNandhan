@@ -68,16 +68,27 @@ bool do_exec(int count, ...)
     }
 
     int status, pid;
+    bool ret = true;
     pid = wait(&status);
         
+    if (pid == -1) {
+        perror("wait() error");
+        ret = false;
+    }
 
-    if (pid == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        return false;
+    if (!WIFEXITED(status)) {
+        fprintf(stderr, "Process %d did not exit properly\n", pid);
+        ret = false;
+    }
+
+    if (WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "Process %d exited with non-zero exit code: %d\n", pid, status);
+        ret = false;
     }
 
     va_end(args);
 
-    return true;
+    return ret;
 }
 
 /**
@@ -139,14 +150,26 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     close(fd);
 
     int status, pid;
+    bool ret = true;
 
     pid = wait(&status);
 
-    if (pid == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        return false;
+    if (pid == -1) {
+        perror("wait() error");
+        ret = false;
+    }
+
+    if (!WIFEXITED(status)) {
+        fprintf(stderr, "Process %d did not exit properly\n", pid);
+        ret = false;
+    }
+
+    if (WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "Process %d exited with non-zero exit code: %d\n", pid, status);
+        ret = false;
     }
 
     va_end(args);
 
-    return true;
+    return ret;
 }
