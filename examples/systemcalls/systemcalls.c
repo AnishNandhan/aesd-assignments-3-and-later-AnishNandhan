@@ -1,4 +1,9 @@
 #include "systemcalls.h"
+#include <fcntl.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -9,13 +14,11 @@
 */
 bool do_system(const char *cmd)
 {
+    int rc = system(cmd);
 
-/*
- * TODO  add your code here
- *  Call the system() function with the command set in the cmd
- *   and return a boolean true if the system() call completed with success
- *   or false() if it returned a failure
-*/
+    if (rc != 0) {
+        return false;
+    }
 
     return true;
 }
@@ -45,19 +48,28 @@ bool do_exec(int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
 
-/*
- * TODO:
- *   Execute a system command by calling fork, execv(),
- *   and wait instead of system (see LSP page 161).
- *   Use the command[0] as the full path to the command to execute
- *   (first argument to execv), and use the remaining arguments
- *   as second argument to the execv() command.
- *
-*/
+    int cpid = fork();
+
+    if (cpid == -1) {
+        return false;
+    }
+
+    if (cpid == 0) {
+        int ret;
+        ret = execv(command[0], command);
+        if (ret == -1) {
+            _exit(EXIT_FAILURE);
+        }
+    }
+
+    int status, pid;
+    pid = wait(&status);
+        
+
+    if (pid == -1 || (WIFEXITED(status) && WEXITSTATUS(status) != 0)) {
+        return false;
+    }
 
     va_end(args);
 
@@ -80,10 +92,6 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
-
 
 /*
  * TODO
@@ -92,6 +100,46 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+    int fd, cpid;
+
+    fd = open(outputfile, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IROTH | S_IRGRP);
+
+    if (fd == -1) {
+        perror("Failed to open file");
+        return false;
+    }
+
+    cpid = fork();
+
+    if (cpid == -1) {
+        perror("fork() error");
+        return false;
+    }
+
+    fflush(stdout);
+
+    if (cpid == 0) {
+        if (dup2(fd, 1) == -1) {
+            perror("dup2() error");
+            _exit(EXIT_FAILURE);
+        }
+        close(fd);
+        int ret;
+        ret = execv(command[0], command);
+        if (ret == -1) {
+            _exit(EXIT_FAILURE);
+        }
+    }
+
+    close(fd);
+
+    int status, pid;
+
+    pid = wait(&status);
+
+    if (pid == -1 || (WIFEXITED(status) && WEXITSTATUS(status) != 0)) {
+        return false;
+    }
 
     va_end(args);
 
