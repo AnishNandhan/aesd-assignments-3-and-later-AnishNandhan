@@ -52,13 +52,17 @@ bool do_exec(int count, ...)
     int cpid = fork();
 
     if (cpid == -1) {
+        perror("fork() error");
         return false;
     }
+
+    fflush(stdout);
 
     if (cpid == 0) {
         int ret;
         ret = execv(command[0], command);
         if (ret == -1) {
+            perror("execv() failure");
             _exit(EXIT_FAILURE);
         }
     }
@@ -67,7 +71,7 @@ bool do_exec(int count, ...)
     pid = wait(&status);
         
 
-    if (pid == -1 || (WIFEXITED(status) && WEXITSTATUS(status) != 0)) {
+    if (pid == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         return false;
     }
 
@@ -127,6 +131,7 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
         int ret;
         ret = execv(command[0], command);
         if (ret == -1) {
+            perror("execv() failure");
             _exit(EXIT_FAILURE);
         }
     }
@@ -137,7 +142,7 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
 
     pid = wait(&status);
 
-    if (pid == -1 || (WIFEXITED(status) && WEXITSTATUS(status) != 0)) {
+    if (pid == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         return false;
     }
 
