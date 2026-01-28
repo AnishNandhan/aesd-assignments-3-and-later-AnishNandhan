@@ -53,6 +53,7 @@ bool do_exec(int count, ...)
 
     if (cpid == -1) {
         perror("fork() error");
+        va_end(args);
         return false;
     }
 
@@ -121,6 +122,7 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
 
     if (fd == -1) {
         perror("Failed to open file");
+        va_end(args);
         return false;
     }
 
@@ -128,6 +130,7 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
 
     if (cpid == -1) {
         perror("fork() error");
+        va_end(args);
         return false;
     }
 
