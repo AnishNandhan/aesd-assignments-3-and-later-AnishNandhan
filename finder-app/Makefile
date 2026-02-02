@@ -1,10 +1,13 @@
+CC = ${CROSS-COMPILE}gcc
+CFLAGS = -Wall -g
+
 all: writer
 
 writer: writer.o
-	$(CROSS_COMPILE)gcc -o writer writer.o
+	$(CC) $(CFALGS) -o writer writer.o
 
 writer.o: writer.c
-	$(CROSS_COMPILE)gcc -c writer.c
+	$(CC) $(CFLAGS) -c writer.c
 
 # Reference: https://stackoverflow.com/questions/2145590/what-is-the-purpose-of-phony-in-a-makefile
 .PHONY: clean
