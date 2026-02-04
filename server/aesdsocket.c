@@ -90,6 +90,7 @@ int main(int argc, char* argv[]) {
     freeaddrinfo(servinfo);
 
     if (!bind_success) {
+        closelog();
         return -1;
     }
 
@@ -116,7 +117,10 @@ int main(int argc, char* argv[]) {
         // TODO: setsid and redirect stderr to /dev/null
     }
 
-    if (!fork_success) return -1;
+    if (!fork_success) {
+        closelog();
+        return -1;
+    }
 
     bool success = true;
     if (listen(sockfd, BACKLOG) != 0) {
@@ -154,6 +158,7 @@ int main(int argc, char* argv[]) {
 
     if (!success) {
         syslog(LOG_ERR, "Error initalizing socket server");
+        closelog();
         return -1;
     }
 
@@ -161,6 +166,7 @@ int main(int argc, char* argv[]) {
         if (terminate) {
             syslog(LOG_INFO, "Caught signal, exiting");
             cleanup();
+            closelog();
             return 0;
         }
         sin_size = sizeof(their_addr);
@@ -221,6 +227,7 @@ int main(int argc, char* argv[]) {
     }
 
     cleanup();
+    closelog();
 
     return 0;
 }
