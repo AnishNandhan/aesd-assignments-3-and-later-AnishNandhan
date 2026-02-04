@@ -222,7 +222,7 @@ int main(int argc, char* argv[]) {
                 syslog(LOG_INFO, "Sent %ld bytes to %s", send_bytes, s);
             }
         }
-        syslog(LVL_INFO, "Closed connection from %s", s);
+        syslog(LOG_INFO, "Closed connection from %s", s);
         shutdown(newfd, SHUT_RDWR);
         close(newfd);
     }
