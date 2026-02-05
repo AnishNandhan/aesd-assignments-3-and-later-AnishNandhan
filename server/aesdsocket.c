@@ -90,6 +90,7 @@ int main(int argc, char* argv[]) {
     freeaddrinfo(servinfo);
 
     if (!bind_success) {
+        cleanup();
         closelog();
         return -1;
     }
@@ -114,10 +115,33 @@ int main(int argc, char* argv[]) {
             syslog(LOG_INFO, "\"-d\" mentioned, exiting from parent");
             return 0;
         }
-        // TODO: setsid and redirect stderr to /dev/null
+        if (setsid() < 0) {
+            syslog(LOG_ERR, "Failed to set sid: %s", strerror(errno));
+            fork_success = false;;
+        }
+        int nullfd;
+        nullfd = open("/dev/null", O_RDWR);
+        if (nullfd == -1) {
+            syslog(LOG_ERR, "Failed to open /dev/null: %s", strerror(errno));
+            fork_success = false;
+        }
+        if (
+            dup2(nullfd, STDOUT_FILENO) < 0 ||
+            dup2(nullfd, STDIN_FILENO) < 0 ||
+            dup2(nullfd, STDERR_FILENO) < 0
+        ) {
+            syslog(LOG_ERR, "dup2() error: %s", strerror(errno));
+            fork_success = false;
+        } else {
+            close(nullfd);
+            close(STDOUT_FILENO);
+            close(STDIN_FILENO);
+            close(STDERR_FILENO);
+        }
     }
 
     if (!fork_success) {
+        cleanup();
         closelog();
         return -1;
     }
@@ -158,17 +182,12 @@ int main(int argc, char* argv[]) {
 
     if (!success) {
         syslog(LOG_ERR, "Error initalizing socket server");
+        cleanup();
         closelog();
         return -1;
     }
 
-    while (true) {
-        if (terminate) {
-            syslog(LOG_INFO, "Caught signal, exiting");
-            cleanup();
-            closelog();
-            return 0;
-        }
+    while (!terminate) {
         sin_size = sizeof(their_addr);
         if ((newfd = accept(sockfd, (struct sockaddr*)&their_addr, &sin_size)) == -1) {
             syslog(LOG_ERR, "Accept error: %s", strerror(errno));
@@ -226,7 +245,8 @@ int main(int argc, char* argv[]) {
         shutdown(newfd, SHUT_RDWR);
         close(newfd);
     }
-
+    
+    syslog(LOG_INFO, "Caught signal, exiting");
     cleanup();
     closelog();
 
