@@ -1,40 +1,88 @@
-#include <sys/socket.h>
+#define _GNU_SOURCE
+
+#include "aesdsocket.h"
+#include <sys/time.h>
 #include <sys/types.h>
 #include <errno.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <stdio.h>
-#include <stdbool.h>
 #include <stdlib.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <syslog.h>
 #include <string.h>
 #include <signal.h>
+#include <poll.h>
+#include <time.h>
 
 #define PORT "9000"
 #define BACKLOG 5
 #define SOCKFILE "/var/tmp/aesdsocketdata"
 #define BUFFER_SIZE 1024
 
-char *readbuf, *writebuf;
 int sockfd, newfd, filefd;
+pthread_mutex_t file_mutex;
 bool terminate = false;
 
 static void cleanup() {
     shutdown(sockfd, SHUT_RDWR);
     close(sockfd);
-    shutdown(newfd, SHUT_RDWR);
-    close(newfd);
-    free(readbuf);
-    free(writebuf);
     close(filefd);
     unlink(SOCKFILE);
+    pthread_mutex_destroy(&file_mutex);
+}
+
+static void print_time() {
+    int rc;
+    time_t t;
+    struct tm break_time;
+    char outtime[50];
+    char writebuf[100] = "timestamp:";
+    size_t strtime_len;
+
+    if (time(&t) == -1) {
+        syslog(LOG_ERR, "Error getting time: %s", strerror(errno));
+        return;
+    }
+
+    if (localtime_r(&t, &break_time) == NULL) {
+        syslog(LOG_ERR, "Error converting time to human readable format: %s", strerror(errno));
+        return;
+    }
+
+    strtime_len = strftime(outtime, sizeof(outtime), "%a, %d %b %Y %T %z", &break_time);
+
+    if (strtime_len == 0) {
+        syslog(LOG_ERR, "Error formatting time");
+        return;
+    }
+
+    outtime[strtime_len] = '\n';
+    strncat(writebuf, outtime, strtime_len + 1);
+
+    rc = pthread_mutex_lock(&file_mutex);
+    if (rc != 0) {
+        syslog(LOG_ERR, "Error acquiring file mutex");
+        return;
+    }
+
+    if (write(filefd, writebuf, strlen(writebuf)) == -1) {
+        syslog(LOG_ERR, "Error writing time to file: %s", strerror(errno));
+    }
+    
+    rc = pthread_mutex_unlock(&file_mutex);
+    if (rc != 0) {
+        syslog(LOG_ERR, "Error unlocking file mutex");
+        return;
+    }
 }
 
 void signal_handler(int sig_num) {
     if (sig_num == SIGINT || sig_num == SIGTERM) {
         terminate = true;
+    } else if (sig_num == SIGALRM) {
+        print_time();
     }
 }
 
@@ -47,16 +95,164 @@ void *get_in_addr(struct sockaddr *sa)
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
+static void *thread_handle_conn(void *thread_params) {
+    struct thread_conn_data *conn_params = (struct thread_conn_data*)thread_params;
+    char *readbuf = conn_params->read_buffer;
+    char *writebuf = conn_params->write_buffer;
+    int rc;
+
+    ssize_t recv_bytes, written_bytes, read_bytes, send_bytes;
+    bool packet_received = false;
+    
+    syslog(LOG_INFO, "Accepted connection from %s", conn_params->conn_ip);
+
+    if (pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL) != 0) {
+        syslog(LOG_ERR, "Error setting thread cancel state");
+        conn_params->thread_complete_success = false;
+        return thread_params;
+    }
+
+    rc = pthread_mutex_lock(conn_params->mutex);
+    if (rc != 0) {
+        syslog(LOG_ERR, "Error acquiring mutex");
+        conn_params->thread_complete_success = false;
+        return thread_params;
+    }
+    bool packet_written = true;
+    while (!packet_received) {
+        recv_bytes = recv(conn_params->connfd, readbuf, BUFFER_SIZE - 1, 0);
+        if (recv_bytes == -1) {
+            syslog(LOG_ERR, "recv() error: %s", strerror(errno));
+            packet_written = false;
+            break;
+        } else if (recv_bytes == 0) {
+            syslog(LOG_DEBUG, "No more bytes to read from client");
+            break;
+        }
+        readbuf[recv_bytes] = '\0';
+        if (readbuf[recv_bytes - 1] == '\n') {
+            packet_received = true;
+        }
+        written_bytes = write(filefd, readbuf, recv_bytes);
+        if (written_bytes == -1) {
+            syslog(LOG_ERR, "write() error: %s", strerror(errno));
+            packet_written = false;
+            break;
+        } else if (written_bytes < recv_bytes) {
+            syslog(LOG_ERR, "Could not write %ld bytes, written bytes: %ld", recv_bytes, written_bytes);
+        } else {
+            syslog(LOG_INFO, "Written %ld bytes: %s", written_bytes, readbuf);
+        }
+    }
+    rc = pthread_mutex_unlock(conn_params->mutex);
+    if (rc != 0) {
+        syslog(LOG_ERR, "Error unlocking mutex");
+        conn_params->thread_complete_success = false;
+        return thread_params;
+    }
+    if (!packet_written) {
+        conn_params->thread_complete_success = false;
+        return thread_params;
+    }
+    bool file_content_sent = true;
+    int read_pos = 0;
+    rc = pthread_mutex_lock(conn_params->mutex);
+    if (rc != 0) {
+        syslog(LOG_ERR, "Error acquiring mutex");
+        conn_params->thread_complete_success = false;
+        return thread_params;
+    }
+    while (true) {
+        read_bytes = pread(filefd, writebuf, BUFFER_SIZE, read_pos);
+        if (read_bytes == -1) {
+            syslog(LOG_ERR, "read() error: %s", strerror(errno));
+            file_content_sent = false;
+            break;
+        } else if (read_bytes == 0) {
+            syslog(LOG_DEBUG, "No more bytes to read from file");
+            break;
+        }
+        read_pos += read_bytes;
+        send_bytes = send(conn_params->connfd, writebuf, read_bytes, 0);
+        if (send_bytes == -1) {
+            syslog(LOG_ERR, "send() error: %s", strerror(errno));
+            file_content_sent = false;
+            break;
+        } else {
+            syslog(LOG_INFO, "Sent %ld bytes to %s", send_bytes, conn_params->conn_ip);
+        }
+    }
+    rc = pthread_mutex_unlock(conn_params->mutex);
+    if (rc != 0) {
+        syslog(LOG_ERR, "Error unlocking mutex");
+        conn_params->thread_complete_success = false;
+        return thread_params;
+    }
+    if (!file_content_sent) {
+        conn_params->thread_complete_success = false;
+        return thread_params;
+    }
+
+    conn_params->thread_complete_success = true;
+    return thread_params;
+}
+
+static void cleanup_thread_list(struct slisthead *head) {
+    struct list_entry *node, *next_node;
+    int tryjoin_rtn = 0;
+    void *thread_rtn = NULL;
+
+    node = SLIST_FIRST(head);
+    while (node != NULL) {
+        tryjoin_rtn = pthread_tryjoin_np(node->thread_id, &thread_rtn);
+        next_node = SLIST_NEXT(node, entries);
+        if (tryjoin_rtn == 0) {
+            free(node->conn_data->read_buffer);
+            free(node->conn_data->write_buffer);
+            syslog(LOG_INFO, "Closed connection from %s", node->conn_data->conn_ip);
+            shutdown(node->conn_data->connfd, SHUT_RDWR);
+            close(node->conn_data->connfd);
+            free(node->conn_data);
+            SLIST_REMOVE(head, node, list_entry, entries);
+            free(node);
+        }
+        node = next_node;
+    } 
+}
+
+static void close_connections(struct slisthead *head) {
+    struct list_entry *node, *next_node;
+
+    node = SLIST_FIRST(head);
+    while (node != NULL) {
+        next_node = SLIST_NEXT(node, entries);
+        pthread_cancel(node->thread_id);
+        free(node->conn_data->read_buffer);
+        free(node->conn_data->write_buffer);
+        syslog(LOG_INFO, "Closed connection from %s", node->conn_data->conn_ip);
+        shutdown(node->conn_data->connfd, SHUT_RDWR);
+        close(node->conn_data->connfd);
+        free(node->conn_data);
+        SLIST_REMOVE(head, node, list_entry, entries);
+        free(node);
+        node = next_node;
+    } 
+}
+
 int main(int argc, char* argv[]) {
     openlog(NULL, 0, LOG_USER);
 
-    int status;
-    bool packet_received;
+    int status, poll_rtn;
     socklen_t sin_size;
-    ssize_t recv_bytes, written_bytes, read_bytes, send_bytes;
     struct sockaddr_storage their_addr;
     struct addrinfo *servinfo, hints;
     struct sigaction new_action;
+    pthread_t conn_thread;
+    struct thread_conn_data *thread_data;
+    struct list_entry *n;
+    struct slisthead head;
+    struct pollfd poll_data;
+    struct itimerval delay;
     char s[INET6_ADDRSTRLEN];
 
     memset(&hints, 0, sizeof(hints));
@@ -162,21 +358,30 @@ int main(int argc, char* argv[]) {
 		syslog(LOG_ERR, "Error %d (%s) registering for SIGINT\n", errno, strerror(errno));
         success = false;
 	}
+	if (sigaction(SIGALRM, &new_action, NULL) != 0) {
+		syslog(LOG_ERR, "Error %d (%s) registering for SIGALRM\n", errno, strerror(errno));
+        success = false;
+	}
 
-    readbuf = malloc(BUFFER_SIZE * sizeof(char));
-    if (readbuf == NULL) {
-        syslog(LOG_ERR, "Malloc error for read buffer: %s", strerror(errno));
-        success = false;
-    }
-    writebuf = malloc(BUFFER_SIZE * sizeof(char));
-    if (writebuf == NULL) {
-        syslog(LOG_ERR, "Malloc error for write buffer: %s", strerror(errno));
-        success = false;
-    }
 
     filefd = open(SOCKFILE, O_RDWR | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
     if (filefd == -1) {
         syslog(LOG_ERR, "open() error: %s", strerror(errno));
+        success = false;
+    }
+
+    if (pthread_mutex_init(&file_mutex, NULL) != 0) {
+        syslog(LOG_ERR, "Error initializing file mutex");
+        success = false;
+    }
+
+    delay.it_value.tv_sec = 10;
+    delay.it_value.tv_usec = 0;
+    delay.it_interval.tv_sec = 10;
+    delay.it_interval.tv_usec = 0;
+
+    if (setitimer(ITIMER_REAL, &delay, NULL) != 0) {
+        syslog(LOG_ERR, "setitimer() error: %s", strerror(errno));
         success = false;
     }
 
@@ -187,66 +392,75 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    poll_data.fd = sockfd;
+    poll_data.events = POLLIN;
+
+    SLIST_INIT(&head);
+
     while (!terminate) {
-        sin_size = sizeof(their_addr);
-        if ((newfd = accept(sockfd, (struct sockaddr*)&their_addr, &sin_size)) == -1) {
-            syslog(LOG_ERR, "Accept error: %s", strerror(errno));
+        poll_rtn = poll(&poll_data, 1, 1000);
+
+        if (poll_rtn == -1) {
+            syslog(LOG_ERR, "poll() error: %s", strerror(errno));
             continue;
-        }
-        inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr*)&their_addr), s, sizeof(s));
-        syslog(LOG_INFO, "Accepted connection from %s", s);
-
-        packet_received = false;
-        while (!packet_received) {
-            recv_bytes = recv(newfd, readbuf, BUFFER_SIZE - 1, 0);
-            if (recv_bytes == -1) {
-                syslog(LOG_ERR, "recv() error: %s", strerror(errno));
-                return -1;
-            } else if (recv_bytes == 0) {
-                syslog(LOG_DEBUG, "No more bytes to read from client");
-                break;
+        } else if (poll_rtn == 1) {
+            sin_size = sizeof(their_addr);
+            if ((newfd = accept(sockfd, (struct sockaddr*)&their_addr, &sin_size)) == -1) {
+                syslog(LOG_ERR, "Accept error: %s", strerror(errno));
+                continue;
             }
 
-            readbuf[recv_bytes] = '\0';
-            if (readbuf[recv_bytes - 1] == '\n') {
-                packet_received = true;
-            }
-            written_bytes = write(filefd, readbuf, recv_bytes);
-            if (written_bytes == -1) {
-                syslog(LOG_ERR, "write() error: %s", strerror(errno));
-                return -1;
-            } else if (written_bytes < recv_bytes) {
-                syslog(LOG_ERR, "Could not write %ld bytes, written bytes: %ld", recv_bytes, written_bytes);
-            } else {
-                syslog(LOG_INFO, "Written %ld bytes: %s", written_bytes, readbuf);
-            }
-        }
-        int read_pos = 0;
-        while (true) {
-            read_bytes = pread(filefd, writebuf, BUFFER_SIZE, read_pos); 
-            if (read_bytes == -1) {
+            memset(s, 0, INET6_ADDRSTRLEN);
+            inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr*)&their_addr), s, sizeof(s));
             
-                syslog(LOG_ERR, "read() error: %s", strerror(errno));
-                return -1;
-            } else if (read_bytes == 0) {
-                syslog(LOG_DEBUG, "No more bytes to read from file");
-                break;
+            char *readbuf = (char*)malloc(BUFFER_SIZE * sizeof(char));
+            if (readbuf == NULL) {
+                syslog(LOG_ERR, "Malloc error for read buffer: %s", strerror(errno));
+                continue;
             }
-            read_pos += read_bytes;
-            send_bytes = send(newfd, writebuf, read_bytes, 0);
-            if (send_bytes == -1) {
-                syslog(LOG_ERR, "send() error: %s", strerror(errno));
-                return -1;
-            } else {
-                syslog(LOG_INFO, "Sent %ld bytes to %s", send_bytes, s);
+            memset(readbuf, 0, BUFFER_SIZE * sizeof(char));
+            char *writebuf = (char*)malloc(BUFFER_SIZE * sizeof(char));
+            if (writebuf == NULL) {
+                syslog(LOG_ERR, "Malloc error for write buffer: %s", strerror(errno));
+                free(readbuf);
+                continue;
             }
-        }
-        syslog(LOG_INFO, "Closed connection from %s", s);
-        shutdown(newfd, SHUT_RDWR);
-        close(newfd);
+            memset(writebuf, 0, BUFFER_SIZE * sizeof(char));
+
+            thread_data = (struct thread_conn_data*)malloc(sizeof(struct thread_conn_data));
+            if (thread_data == NULL) {
+                syslog(LOG_ERR, "Malloc error for thread data: %s", strerror(errno));
+                free(readbuf);
+                free(writebuf);
+                continue;
+            }
+            thread_data->connfd = newfd;
+            thread_data->conn_ip = s;
+            thread_data->read_buffer = readbuf;
+            thread_data->write_buffer = writebuf;
+            thread_data->mutex = &file_mutex;
+            thread_data->thread_complete_success = false;
+
+            pthread_create(&conn_thread, NULL, thread_handle_conn, thread_data);
+
+            n = (struct list_entry*)malloc(sizeof(struct list_entry));
+            if (n == NULL) {
+                syslog(LOG_ERR, "Malloc error for list entry");
+                free(readbuf);
+                free(writebuf);
+                free(thread_data);
+                continue;
+            }
+            n->thread_id = conn_thread;
+            n->conn_data = thread_data;
+            SLIST_INSERT_HEAD(&head, n, entries);
+        } 
+        cleanup_thread_list(&head);
     }
     
     syslog(LOG_INFO, "Caught signal, exiting");
+    printf("Caught signal, exiting\n");
+    close_connections(&head);
     cleanup();
     closelog();
 
