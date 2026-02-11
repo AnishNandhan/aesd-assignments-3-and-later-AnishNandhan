@@ -1,16 +1,21 @@
-CC = ${CROSS_COMPILE}gcc
-CFLAGS = -g -Wall -Werror
+CC ?= ${CROSS_COMPILE}gcc
+CFLAGS ?= -g -Wall -Werror
+LDFLAGS ?= -lpthread -lrt
+INLCUDE ?=
+TARGET ?= aesdsocket
+
+OBJECTS += aesdsocket.o
 
 default: all
 
-all: aesdsocket
+all: $(TARGET)
 
-aesdsocket: aesdsocket.o
-	$(CC) $(CFLAGS) -o aesdsocket aesdsocket.o
+$(TARGET): $(OBJECTS)
+	$(CC) $(LDFLAGS) $(OBJECTS) -o $@
 
-aesdsocket.o: aesdsocket.c
-	$(CC) $(CFLAGS) -c aesdsocket.c
+$(OBJECTS): aesdsocket.c
+	$(CC) $(CFLAGS) $(INLCUDES) -c aesdsocket.c
 
 .PHONY: clean
 clean:
-	rm -f *.o aesdsocket
+	rm -f *.o $(TARGET)
