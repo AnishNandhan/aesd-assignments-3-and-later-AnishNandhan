@@ -3,6 +3,8 @@
 #include <sys/queue.h>
 #include <sys/socket.h>
 
+#define USE_AESD_CHAR_DEVICE 1
+
 struct thread_conn_data {
     int connfd;
     char *conn_ip;

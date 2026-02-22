@@ -18,7 +18,11 @@
 
 #define PORT "9000"
 #define BACKLOG 5
+#ifdef USE_AESD_CHAR_DEVICE
 #define SOCKFILE "/var/tmp/aesdsocketdata"
+#else
+#define SOCKFILE "/dev/aesdchar"
+#endif
 #define BUFFER_SIZE 1024
 
 int sockfd, newfd, filefd;
@@ -29,7 +33,9 @@ static void cleanup() {
     shutdown(sockfd, SHUT_RDWR);
     close(sockfd);
     close(filefd);
+#ifndef USE_AESD_CHAR_DEVICE
     unlink(SOCKFILE);
+#endif
     pthread_mutex_destroy(&file_mutex);
 }
 
@@ -252,7 +258,6 @@ int main(int argc, char* argv[]) {
     struct list_entry *n;
     struct slisthead head;
     struct pollfd poll_data;
-    struct itimerval delay;
     char s[INET6_ADDRSTRLEN];
 
     memset(&hints, 0, sizeof(hints));
@@ -375,6 +380,8 @@ int main(int argc, char* argv[]) {
         success = false;
     }
 
+#ifndef USE_AESD_CHAR_DEVICE
+    struct itimerval delay;
     delay.it_value.tv_sec = 10;
     delay.it_value.tv_usec = 0;
     delay.it_interval.tv_sec = 10;
@@ -384,6 +391,7 @@ int main(int argc, char* argv[]) {
         syslog(LOG_ERR, "setitimer() error: %s", strerror(errno));
         success = false;
     }
+#endif
 
     if (!success) {
         syslog(LOG_ERR, "Error initalizing socket server");
