@@ -35,10 +35,8 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 
     if (buffer->full) {
         total_elements = AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-    } else if (buffer->in_offs >= buffer->out_offs) {
-        total_elements = buffer->in_offs - buffer->out_offs;
     } else {
-        total_elements = (AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED - buffer->out_offs) + buffer->in_offs;
+        total_elements = (buffer->in_offs - buffer->out_offs + AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
     }
 
     uint8_t n;

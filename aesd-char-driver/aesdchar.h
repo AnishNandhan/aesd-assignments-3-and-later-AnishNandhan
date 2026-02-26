@@ -8,12 +8,21 @@
 #ifndef AESD_CHAR_DRIVER_AESDCHAR_H_
 #define AESD_CHAR_DRIVER_AESDCHAR_H_
 
+#include <asm-generic/access_ok.h>
 #include <linux/mutex.h>
 #include <linux/list.h>
+#include <linux/version.h>
 #include "aesd-circular-buffer.h"
 
 #define AESD_DEBUG 1  //Remove comment on this line to enable debug
-#define MAX_COMMAND_SIZE 512
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
+#define access_ok_wrapper(type,arg,cmd) \
+	access_ok(type, arg, cmd)
+#else
+#define access_ok_wrapper(type,arg,cmd) \
+	access_ok(arg, cmd)
+#endif
 
 #undef PDEBUG             /* undef it, just in case */
 #ifdef AESD_DEBUG

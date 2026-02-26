@@ -9,7 +9,9 @@ else
   DEBFLAGS = -O2
 endif
 
+INC=$(PWD)/../include
 EXTRA_CFLAGS += $(DEBFLAGS)
+EXTRA_CFLAGS += -I$(INC)
 
 ifneq ($(KERNELRELEASE),)
 # call from kernel build system

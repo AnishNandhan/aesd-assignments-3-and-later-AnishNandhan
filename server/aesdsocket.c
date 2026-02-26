@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "aesdsocket.h"
+#include "aesd_ioctl.h"
 #include <sys/time.h>
 #include <sys/types.h>
 #include <errno.h>
@@ -16,24 +17,28 @@
 #include <poll.h>
 #include <time.h>
 
+#ifndef USE_AESD_CHAR_DEVICE
+#define USE_AESD_CHAR_DEVICE 1
+#endif
+
 #define PORT "9000"
 #define BACKLOG 5
-#ifdef USE_AESD_CHAR_DEVICE
-#define SOCKFILE "/var/tmp/aesdsocketdata"
-#else
+#if USE_AESD_CHAR_DEVICE
 #define SOCKFILE "/dev/aesdchar"
+#else
+#define SOCKFILE "/var/tmp/aesdsocketdata"
 #endif
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 2048
 
-int sockfd, newfd, filefd;
+int sockfd, filefd_for_time;
 pthread_mutex_t file_mutex;
 bool terminate = false;
 
 static void cleanup() {
     shutdown(sockfd, SHUT_RDWR);
     close(sockfd);
-    close(filefd);
-#ifndef USE_AESD_CHAR_DEVICE
+#if !USE_AESD_CHAR_DEVICE
+    close(filefd_for_time);
     unlink(SOCKFILE);
 #endif
     pthread_mutex_destroy(&file_mutex);
@@ -73,7 +78,7 @@ static void print_time() {
         return;
     }
 
-    if (write(filefd, writebuf, strlen(writebuf)) == -1) {
+    if (write(filefd_for_time, writebuf, strlen(writebuf)) == -1) {
         syslog(LOG_ERR, "Error writing time to file: %s", strerror(errno));
     }
     
@@ -109,6 +114,7 @@ static void *thread_handle_conn(void *thread_params) {
 
     ssize_t recv_bytes, written_bytes, read_bytes, send_bytes;
     bool packet_received = false;
+
     
     syslog(LOG_INFO, "Accepted connection from %s", conn_params->conn_ip);
 
@@ -139,7 +145,31 @@ static void *thread_handle_conn(void *thread_params) {
         if (readbuf[recv_bytes - 1] == '\n') {
             packet_received = true;
         }
-        written_bytes = write(filefd, readbuf, recv_bytes);
+
+        // Handle ioctl command
+        if (strncmp(readbuf, "AESDCHAR_IOCSEEKTO", 18) == 0) {
+            struct aesd_seekto seekto;
+            char *comma, *colon;
+            syslog(LOG_INFO, "AESDCHAR_IOCSEEKTO ioctl ccommand received, %s", readbuf);
+            if ((colon = strchr(readbuf, ':')) == NULL) {
+                syslog(LOG_ERR, "Colon not found in AESDCHAR_IOCSEEKTO ioctl string");
+                continue;
+            } else {
+                seekto.write_cmd = (uint32_t)strtoul(colon + 1, NULL, 0);
+            }
+            if ((comma = strchr(readbuf, ',')) == NULL) {
+                syslog(LOG_ERR, "Comma not found in AESDCHAR_IOCSEEKTO ioctl string");
+            } else {
+                seekto.write_cmd_offset = (uint32_t)strtoul(comma + 1, NULL, 0);
+            }
+            syslog(LOG_INFO, "Sending AESDCHAR_IOCSEEKTO ioctl with args %u and %u", seekto.write_cmd, seekto.write_cmd_offset);
+            if (ioctl(conn_params->readfd, AESDCHAR_IOCSEEKTO, &seekto) == -1) {
+                syslog(LOG_ERR, "ioctl error: %s", strerror(errno));
+            }
+            continue;
+        }
+
+        written_bytes = write(conn_params->writefd, readbuf, recv_bytes);
         if (written_bytes == -1) {
             syslog(LOG_ERR, "write() error: %s", strerror(errno));
             packet_written = false;
@@ -169,7 +199,7 @@ static void *thread_handle_conn(void *thread_params) {
         return thread_params;
     }
     while (true) {
-        read_bytes = pread(filefd, writebuf, BUFFER_SIZE, read_pos);
+        read_bytes = read(conn_params->readfd, writebuf, BUFFER_SIZE);
         if (read_bytes == -1) {
             syslog(LOG_ERR, "read() error: %s", strerror(errno));
             file_content_sent = false;
@@ -218,6 +248,8 @@ static void cleanup_thread_list(struct slisthead *head) {
             syslog(LOG_INFO, "Closed connection from %s", node->conn_data->conn_ip);
             shutdown(node->conn_data->connfd, SHUT_RDWR);
             close(node->conn_data->connfd);
+            close(node->conn_data->readfd);
+            close(node->conn_data->writefd);
             free(node->conn_data);
             SLIST_REMOVE(head, node, list_entry, entries);
             free(node);
@@ -238,6 +270,8 @@ static void close_connections(struct slisthead *head) {
         syslog(LOG_INFO, "Closed connection from %s", node->conn_data->conn_ip);
         shutdown(node->conn_data->connfd, SHUT_RDWR);
         close(node->conn_data->connfd);
+        close(node->conn_data->readfd);
+        close(node->conn_data->writefd);
         free(node->conn_data);
         SLIST_REMOVE(head, node, list_entry, entries);
         free(node);
@@ -249,6 +283,7 @@ int main(int argc, char* argv[]) {
     openlog(NULL, 0, LOG_USER);
 
     int status, poll_rtn;
+    int readfd, writefd, newfd;
     socklen_t sin_size;
     struct sockaddr_storage their_addr;
     struct addrinfo *servinfo, hints;
@@ -368,19 +403,18 @@ int main(int argc, char* argv[]) {
         success = false;
 	}
 
-
-    filefd = open(SOCKFILE, O_RDWR | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-    if (filefd == -1) {
-        syslog(LOG_ERR, "open() error: %s", strerror(errno));
-        success = false;
-    }
-
     if (pthread_mutex_init(&file_mutex, NULL) != 0) {
         syslog(LOG_ERR, "Error initializing file mutex");
         success = false;
     }
 
-#ifndef USE_AESD_CHAR_DEVICE
+#if !USE_AESD_CHAR_DEVICE
+    filefd_for_time = open(SOCKFILE, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    if (filefd_for_time == -1) {
+        syslog(LOG_ERR, "open() error: %s", strerror(errno));
+        success = false;
+    }
+
     struct itimerval delay;
     delay.it_value.tv_sec = 10;
     delay.it_value.tv_usec = 0;
@@ -406,7 +440,7 @@ int main(int argc, char* argv[]) {
     SLIST_INIT(&head);
 
     while (!terminate) {
-        poll_rtn = poll(&poll_data, 1, 1000);
+        poll_rtn = poll(&poll_data, 1, -1);
 
         if (poll_rtn == -1) {
             syslog(LOG_ERR, "poll() error: %s", strerror(errno));
@@ -420,6 +454,18 @@ int main(int argc, char* argv[]) {
 
             memset(s, 0, INET6_ADDRSTRLEN);
             inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr*)&their_addr), s, sizeof(s));
+            
+            readfd = open(SOCKFILE, O_RDONLY);
+            if (readfd == -1) {
+                syslog(LOG_ERR, "open() error: %s", strerror(errno));
+                continue;
+            }
+            
+            writefd = open(SOCKFILE, O_RDWR | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+            if (writefd == -1) {
+                syslog(LOG_ERR, "open() error: %s", strerror(errno));
+                continue;
+            }
             
             char *readbuf = (char*)malloc(BUFFER_SIZE * sizeof(char));
             if (readbuf == NULL) {
@@ -443,6 +489,8 @@ int main(int argc, char* argv[]) {
                 continue;
             }
             thread_data->connfd = newfd;
+            thread_data->readfd = readfd;
+            thread_data->writefd = writefd;
             thread_data->conn_ip = s;
             thread_data->read_buffer = readbuf;
             thread_data->write_buffer = writebuf;

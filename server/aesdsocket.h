@@ -3,10 +3,10 @@
 #include <sys/queue.h>
 #include <sys/socket.h>
 
-#define USE_AESD_CHAR_DEVICE 1
-
 struct thread_conn_data {
     int connfd;
+    int readfd;
+    int writefd;
     char *conn_ip;
     char *read_buffer;
     char *write_buffer;
